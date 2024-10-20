@@ -10,16 +10,16 @@ import base64
 app = Flask(__name__)
 CORS(app)
 
-app.config[
-    "SQLALCHEMY_DATABASE_URI"
-] = "postgresql+psycopg2://{user}:{passwd}@{host}:{port}/{table}".format(
-    user=os.getenv("POSTGRES_USER"),
-    passwd=os.getenv("POSTGRES_PASSWORD"),
-    host=os.getenv("POSTGRES_HOST"),
-    port=5432,
-    table=os.getenv("POSTGRES_DB"),
+# Database configuration
+app.config["SQLALCHEMY_DATABASE_URI"] = (
+    "postgresql+psycopg2://{user}:{passwd}@{host}:{port}/{table}".format(
+        user=os.getenv("POSTGRES_USER"),
+        passwd=os.getenv("POSTGRES_PASSWORD"),
+        host=os.getenv("POSTGRES_HOST"),
+        port=5432,
+        table=os.getenv("POSTGRES_DB"),
+    )
 )
-
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -28,14 +28,9 @@ migrate = Migrate(app, db)
 
 class UserModel(db.Model):
     __tablename__ = "users"
-    userID = db.Column(db.Integer(), primary_key=True)
-    username = db.Column(db.String(), unique=True, nullable=False)
-    password = db.Column(db.String(), nullable=False)
-
-    # def __init__(self, userID, username, password):
-    #     self.userID = userID
-    #     self.username = username
-    #     self.password = password
+    userID = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String, unique=True, nullable=False)
+    password = db.Column(db.String, nullable=False)
 
     def __repr__(self):
         return f"<User {self.username}>"
@@ -52,184 +47,133 @@ class Journal(db.Model):
     author_ID = db.Column(db.Integer, db.ForeignKey("users.userID"), nullable=False)
     rela = db.relationship("UserModel", backref="post", lazy=True)
 
-    # def __repr__(self):
-    #     return "<Post %r>" % self.title
-
     def serialize(self):
         return {
-            "id": self.id,
-            "author_ID": self.author,
+            "id": self.postId,
+            "author_ID": self.author_ID,
             "title": self.title,
             "body": self.body,
             "created_at": self.created_at,
         }
 
 
-@app.route("/api/savetoday", methods=("GET", "POST"))
-def create():
-    if request.method == "POST":
-        if "authorization" not in request.headers:
-            return {"error": "No authorization header detected"}, 403
+@app.route("/api/savetoday", methods=["POST"])
+def create_journal():
+    if "authorization" not in request.headers:
+        return {"error": "No authorization header detected"}, 403
 
-        encoded = request.headers["authorization"]
+    encoded = request.headers["authorization"]
+    try:
         data = base64.b64decode(encoded).decode("utf-8")
-        [username, password] = data.strip().split(":")
+        username, password = data.strip().split(":")
+    except (ValueError, base64.binascii.Error):
+        return {"error": "Invalid authorization format"}, 400
 
-        # return {"username": username, "password": password}
+    user = UserModel.query.filter_by(username=username).first()
+    if user is None or not check_password_hash(user.password, password):
+        return {"error": "Invalid user"}, 403
 
-        user = UserModel.query.filter_by(username=username).first()
-        error = None
-        if user is None:
-            error = "Incorrect username."
-        elif not check_password_hash(user.password, password):
-            error = "Incorrect password."
+    content = request.json
+    title = content.get("title")
+    body = content.get("body")
 
-        if error is not None:
-            error = "Invalid user"
-            return {"error": error}, 403
-        else:
-            content = request.json
-            title = content["title"]
+    if not title:
+        return {"error": "Title is required"}, 400
+    if not body:
+        return {"error": "Body is required"}, 400
 
-            body = content["body"]
-            error = None
-            if not title:
-                error = "You need to enter the title"
-            elif not body:
-                error = "You need to write the content"
-            else:
-                user = UserModel.query.filter_by(username=username).first()
-                userID = user.userID
-                new_journal = Journal(title=title, body=body, author_ID=userID)
-                db.session.add(new_journal)
-                db.session.commit()
-                return {"response": f"{title} posted successfully"}
+    new_journal = Journal(title=title, body=body, author_ID=user.userID)
+    db.session.add(new_journal)
+    db.session.commit()
 
-    return {"response": error}
+    return {"response": f"{title} posted successfully"}
 
 
-@app.route("/api/register", methods=("GET", "POST"))
+@app.route("/api/register", methods=["POST"])
 def register():
-    if request.method == "POST":
-        content = request.json
-        name = content["username"]
-        pw = content["password"]
-        error = None
+    content = request.json
+    username = content.get("username")
+    password = content.get("password")
 
-        if not name:
-            error = "Username is required."
-        elif not pw:
-            error = "Password is required."
-        elif UserModel.query.filter_by(username=name).first() is not None:
-            error = f"User {name} is already registered."
+    if not username:
+        return {"error": "Username is required"}, 400
+    if not password:
+        return {"error": "Password is required"}, 400
+    if UserModel.query.filter_by(username=username).first():
+        return {"error": f"User {username} is already registered"}, 400
 
-        if error is None:
-            new_user = UserModel(username=name, password=generate_password_hash(pw))
-            db.session.add(new_user)
-            db.session.commit()
-            return {"response": f"User {name} created successfully"}
-        else:
-            return {"response": error}
-    return "not implemented"
+    new_user = UserModel(username=username, password=generate_password_hash(password))
+    db.session.add(new_user)
+    db.session.commit()
+
+    return {"response": f"User {username} created successfully"}
 
 
-@app.route("/api/login", methods=("GET", "POST"))
+@app.route("/api/login", methods=["POST"])
 def login():
-    if request.method == "POST":
-        content = request.json
-        username = content["username"]
-        password = content["password"]
-        error = None
+    content = request.json
+    username = content.get("username")
+    password = content.get("password")
 
-        user = UserModel.query.filter_by(username=username).first()
-        error = None
-        if user is None:
-            error = "Incorrect username."
-        elif not check_password_hash(user.password, password):
-            error = "Incorrect password."
+    user = UserModel.query.filter_by(username=username).first()
+    if user is None or not check_password_hash(user.password, password):
+        return {"error": "Invalid credentials"}, 403
 
-        if error is None:
-            return {"response": "Login Successful"}
-
-        else:
-            return {"response": error}
-
-    return "not implemented"
+    return {"response": "Login Successful"}
 
 
-# retrieve journal data
-@app.route("/api/logs")
+@app.route("/api/logs", methods=["GET"])
 def get_logs():
-    date = request.args.get("date")  # date = d-m-y
+    date = request.args.get("date")  # date format = d-m-y
 
     if "authorization" not in request.headers:
         return {"error": "No authorization header detected"}, 403
 
     encoded = request.headers["authorization"]
-    data = base64.b64decode(encoded).decode("utf-8")
-    [username, password] = data.strip().split(":")
-
-    # return {"username": username, "password": password}
+    try:
+        data = base64.b64decode(encoded).decode("utf-8")
+        username, password = data.strip().split(":")
+    except (ValueError, base64.binascii.Error):
+        return {"error": "Invalid authorization format"}, 400
 
     user = UserModel.query.filter_by(username=username).first()
-    error = None
-    if user is None:
-        error = "Incorrect username."
-    elif not check_password_hash(user.password, password):
-        error = "Incorrect password."
+    if user is None or not check_password_hash(user.password, password):
+        return {"error": "Invalid user"}, 403
 
-    if error is not None:
-        error = "Invalid user"
-        return {"error": error}, 403
-    else:
-        userID = user.userID
-        posts = Journal.query.filter_by(author_ID=userID).all()
+    posts = Journal.query.filter_by(author_ID=user.userID).all()
 
-        dataTitle = {}
-        dataContent = {}
+    data = {}
+    for post in posts:
+        datetime_str = post.created_at.strftime("%d-%m-%y-%H:%M:%S")
+        data[datetime_str] = {"title": post.title, "content": post.body}
 
-        for post in posts:
-            datetime = post.created_at
-            dateString = datetime.strftime("%d-%m-%y-%H:%M:%S")
-            dataTitle[dateString] = post.title
-            dataContent[dateString] = post.body
-        return {"response": dataContent[date], "title": dataTitle[date]}
+    if date in data:
+        return {"response": data[date]["content"], "title": data[date]["title"]}
+    return {"error": "No post found for the specified date"}, 404
 
 
-# retrieve journal dates
-@app.route("/api/dates")
+@app.route("/api/dates", methods=["GET"])
 def get_dates():
-
     if "authorization" not in request.headers:
         return {"error": "No authorization header detected"}, 403
 
     encoded = request.headers["authorization"]
-    data = base64.b64decode(encoded).decode("utf-8")
-    [username, password] = data.strip().split(":")
+    try:
+        data = base64.b64decode(encoded).decode("utf-8")
+        username, password = data.strip().split(":")
+    except (ValueError, base64.binascii.Error):
+        return {"error": "Invalid authorization format"}, 400
 
     user = UserModel.query.filter_by(username=username).first()
-    error = None
-    if user is None:
-        error = "Incorrect username."
-    elif not check_password_hash(user.password, password):
-        error = "Incorrect password."
+    if user is None or not check_password_hash(user.password, password):
+        return {"error": "Invalid user"}, 403
 
-    if error is not None:
-        error = "Invalid user"
-        return {"error": error}, 403
-    else:
-        userID = user.userID
+    posts = Journal.query.filter_by(author_ID=user.userID).all()
 
-        posts = Journal.query.filter_by(author_ID=userID).all()
-        data = []
-        for post in posts:
-            datetime = post.created_at
-            date = datetime.strftime("%d-%m-%y-%H:%M:%S")
-            # date = datetime.split(" ")[0]
-            data.append(date)
+    output = [{"day": post.created_at.strftime("%d-%m-%y-%H:%M:%S")} for post in posts]
+    return {"response": output}
 
-        output = []
-        for date in data:
-            output.append({"day": date})
-        print(output)
-        return {"response": output}
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
